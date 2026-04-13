@@ -895,7 +895,7 @@ function DetailsTab({ issue }: { issue: Issue }) {
   }
 
   async function handleApply() {
-    const applyRepo = (state.issueSourceRepo || state.repoFullName) as string | null;
+    const applyRepo = state.repoFullName as string | null;
     if (!suggestion || !applyRepo) return;
     setApplyLoading(true);
     setApplyStatus(null);
