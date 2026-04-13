@@ -158,10 +158,10 @@ export async function triggerImplement(issue, overrideAgentId = null) {
   implement(issue, state.repoFullName, _agentConfig(agent, null));
 }
 
-export function triggerRefine(issue) {
+export function triggerRefine(issue, userPrompt = '') {
   const agents = getAgents();
   const agent =
     agents.find((a) => a.actionType === 'refine') ??
     agents.find((a) => a.id === 'refiner');
-  refine(issue, _agentConfig(agent, null));
+  refine(issue, { ..._agentConfig(agent, null), ...(userPrompt ? { userPrompt } : {}) });
 }

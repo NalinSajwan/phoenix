@@ -1,11 +1,10 @@
 import { useState, useRef, useEffect } from 'preact/hooks';
-import { drawerSignal, closeDrawer, setDrawerTab, runsSignal, logsSignal } from '../../lib/signals.js';
+import { drawerSignal, closeDrawer, setDrawerTab, runsSignal, logsSignal, suggestionsSignal, dismissSuggestion } from '../../lib/signals.js';
 import { triggerImplement, cancelRun, pushRun } from '../../scripts/run-dispatcher.js';
 import { updateIssue, fetchIssueComments, createIssueComment, fetchOrgMembers, fetchRepoLabels, createRepoLabel } from '../../lib/github-api.js';
 import { getAgents, getTeams, getCodeEditor, getIssueTeam, setIssueTeam } from '../../lib/agents.js';
 import { AGENT_BASE_URL } from '../../lib/config.js';
 import { state } from '../../scripts/state.js';
-import { suggestionStore } from '../../lib/implementer.js';
 import { renderBoard } from '../../lib/board.js';
 import { getFilters } from '../../scripts/board-loader.js';
 
@@ -872,7 +871,7 @@ function DetailsTab({ issue }: { issue: Issue }) {
   const dupList = state.duplicates.get(issue.number) ?? [];
   const teams = getTeams();
   const assignedTeamId = state.repoFullName ? getIssueTeam(state.repoFullName, issue.number) : null;
-  const suggestion = suggestionStore.get(issue.number);
+  const suggestion = (suggestionsSignal.value as Map<number, any>).get(issue.number);
 
   const stateColor =
     issue.state === 'open'
@@ -914,7 +913,7 @@ function DetailsTab({ issue }: { issue: Issue }) {
       issue.title = suggestion.title;
       issue.body = newBody;
       renderBoard(getFilters);
-      setApplyStatus({ msg: 'Issue updated on GitHub.', ok: true });
+      dismissSuggestion(issue.number);
     } catch (err: any) {
       setApplyStatus({ msg: err.userMessage || err.message, ok: false });
     } finally {
@@ -1236,6 +1235,15 @@ function DetailsTab({ issue }: { issue: Issue }) {
             <p class="text-[10px] font-bold uppercase tracking-widest" style="color:#b45309">
               AI Suggestion
             </p>
+            <button
+              onClick={() => dismissSuggestion(issue.number)}
+              class="ml-auto flex items-center justify-center rounded-full hover:bg-amber-200 transition-colors"
+              style="color:#b45309;padding:2px"
+              title="Dismiss suggestion"
+              aria-label="Dismiss AI suggestion"
+            >
+              <span class="material-symbols-outlined" style="font-size:14px">close</span>
+            </button>
           </div>
           <p class="text-xs font-semibold text-on-surface">{suggestion.title}</p>
           <p class="text-[11px] text-on-surface-variant leading-relaxed">{suggestion.description}</p>
@@ -1322,6 +1330,7 @@ function AITab({ issue }: { issue: Issue }) {
     implementAgents[0]?.id ?? ''
   );
 
+  const [refinePrompt, setRefinePrompt] = useState('');
   const [pushLoading, setPushLoading] = useState(false);
 
   async function handlePush() {
@@ -1366,22 +1375,28 @@ function AITab({ issue }: { issue: Issue }) {
             The agent will rewrite the issue title and description to be clearer, more actionable, and
             better scoped.
           </p>
-          {isIdleOrFailed && (
-            <button
-              onClick={() => {
-                // triggerRefine from run-dispatcher
-                import('../../scripts/run-dispatcher.js').then(({ triggerRefine }) => {
-                  triggerRefine(issue);
-                  setDrawerTab('logs');
-                });
-              }}
-              class="flex items-center justify-center gap-1.5 w-full text-on-primary text-xs font-semibold py-2 rounded-lg transition-all active:scale-95"
-              style="background:linear-gradient(135deg,#6d28d9,#7c3aed)"
-            >
-              <span class="material-symbols-outlined" style="font-size:14px">edit_note</span>
-              {status === 'failed' ? 'Retry' : 'Improve Issue'}
-            </button>
-          )}
+          <textarea
+            value={refinePrompt}
+            onInput={(e) => setRefinePrompt((e.target as HTMLTextAreaElement).value)}
+            placeholder="Provide additional context or instructions for the AI (optional)…"
+            rows={3}
+            class="w-full text-[11px] text-on-surface bg-white rounded-lg px-3 py-2 resize-none outline-none leading-relaxed"
+            style="border:1px solid #c3c6d6"
+          />
+          <button
+            onClick={() => {
+              // triggerRefine from run-dispatcher
+              import('../../scripts/run-dispatcher.js').then(({ triggerRefine }) => {
+                triggerRefine(issue, refinePrompt.trim());
+                setDrawerTab('logs');
+              });
+            }}
+            class="flex items-center justify-center gap-1.5 w-full text-on-primary text-xs font-semibold py-2 rounded-lg transition-all active:scale-95"
+            style="background:linear-gradient(135deg,#6d28d9,#7c3aed)"
+          >
+            <span class="material-symbols-outlined" style="font-size:14px">edit_note</span>
+            Improve Issue
+          </button>
         </div>
       )}
 
@@ -1658,7 +1673,7 @@ function LogsTab({ issue }: { issue: Issue }) {
   const logsMap = logsSignal.value as Map<number, LogEntry[]>;
   const run = runs.get(issue.number);
   const logs = logsMap.get(issue.number) ?? [];
-  const hasSuggestion = suggestionStore.has(issue.number);
+  const hasSuggestion = (suggestionsSignal.value as Map<number, any>).has(issue.number);
 
   const groups = groupLogsByRun(logs);
   const latestRunIndex = groups.length > 0 ? groups[groups.length - 1].runIndex : -1;

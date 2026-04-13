@@ -9,6 +9,7 @@ import {
   cancelRun,
   pushRun,
   suggestionStore,
+  dismissSuggestion,
   logDelegation,
 } from '../lib/implementer.js';
 import { getAgents, getTeams, getCodeEditor, getIssueTeam, setIssueTeam, getGlobalAiKey } from '../lib/agents.js';
@@ -283,6 +284,15 @@ function _renderDetails(issue) {
 
   const suggestion = suggestionStore.get(issue.number);
 
+  // Wire dismiss button
+  const dismissBtn = $('drawer-body').querySelector('[data-dismiss-suggestion]');
+  if (dismissBtn && suggestion) {
+    dismissBtn.addEventListener('click', () => {
+      dismissSuggestion(issue.number);
+      _renderDrawerBody();
+    });
+  }
+
   // Wire copy-as-markdown button
   const copyBtn = $('drawer-body').querySelector('[data-copy-suggestion]');
   if (copyBtn && suggestion) {
@@ -327,14 +337,8 @@ function _renderDetails(issue) {
         issue.title = suggestion.title;
         issue.body = newBody;
         renderBoard(getFilters);
-        applyBtn.innerHTML =
-          '<span class="material-symbols-outlined" style="font-size:11px">check_circle</span>Applied';
-        applyBtn.style.background = '#16a34a';
-        if (applyStatus) {
-          applyStatus.textContent = 'Issue updated on GitHub.';
-          applyStatus.style.color = '#16a34a';
-          applyStatus.classList.remove('hidden');
-        }
+        dismissSuggestion(issue.number);
+        _renderDrawerBody();
       } catch (err) {
         applyBtn.disabled = false;
         applyBtn.innerHTML =
@@ -1110,6 +1114,11 @@ function _renderSuggestionCard(issueNumber) {
       <div class="flex items-center gap-2">
         <span class="material-symbols-outlined" style="font-size:16px;color:#b45309">auto_awesome</span>
         <p class="text-[10px] font-bold uppercase tracking-widest" style="color:#b45309">AI Suggestion</p>
+        <button data-dismiss-suggestion
+          class="ml-auto flex items-center justify-center rounded-full hover:bg-amber-200 transition-colors"
+          style="color:#b45309;padding:2px" title="Dismiss suggestion" aria-label="Dismiss AI suggestion">
+          <span class="material-symbols-outlined" style="font-size:14px">close</span>
+        </button>
       </div>
       <p class="text-xs font-semibold text-on-surface">${escHtml(suggestion.title)}</p>
       <p class="text-[11px] text-on-surface-variant leading-relaxed">${escHtml(suggestion.description)}</p>

@@ -65,6 +65,7 @@ class RefineRequest(BaseModel):
     llm_api_key: Optional[str] = None
     llm_base_url: Optional[str] = None
     system_prompt: Optional[str] = None
+    user_prompt: Optional[str] = None
     sampling: Optional[str] = None
 
 

@@ -9,7 +9,14 @@
  * signals directly — signals are framework-agnostic.
  */
 import { signal } from '@preact/signals';
-import { runStore, logStore, onRunUpdate, clearHistory as _clearHistory } from './implementer.js';
+import {
+  runStore,
+  logStore,
+  suggestionStore,
+  onRunUpdate,
+  clearHistory as _clearHistory,
+  dismissSuggestion as _dismissSuggestion,
+} from './implementer.js';
 import {
   getAgents as _getAgents,
   saveAgent as _saveAgent,
@@ -45,6 +52,7 @@ export function setDrawerTab(tab) {
 
 export const runsSignal = signal(new Map(runStore));
 export const logsSignal = signal(new Map(logStore));
+export const suggestionsSignal = signal(new Map(suggestionStore));
 export const agentsSignal = signal(_getAgents());
 
 // Bridge: every time implementer fires a run update, push new Map copies so
@@ -52,6 +60,7 @@ export const agentsSignal = signal(_getAgents());
 onRunUpdate(() => {
   runsSignal.value = new Map(runStore);
   logsSignal.value = new Map(logStore);
+  suggestionsSignal.value = new Map(suggestionStore);
 });
 
 // ── Agent helpers ─────────────────────────────────────────────────────────────
@@ -74,4 +83,14 @@ export function removeAgent(id) {
 
 export function clearHistory() {
   _clearHistory();
+}
+
+/**
+ * Dismiss the AI suggestion for an issue and update the reactive signal so
+ * all subscribed Preact islands re-render immediately.
+ * @param {number} issueNumber
+ */
+export function dismissSuggestion(issueNumber) {
+  _dismissSuggestion(issueNumber);
+  suggestionsSignal.value = new Map(suggestionStore);
 }

@@ -73,6 +73,8 @@ async def _run_refine(run_id: str, req: RefineRequest, queue: asyncio.Queue) -> 
             system = f"{req.system_prompt.strip()}\n\n{system}"
 
         user = f"Issue title: {req.title}\n\nIssue body:\n{req.body or '(no body provided)'}"
+        if req.user_prompt:
+            user += f"\n\nAdditional instructions:\n{req.user_prompt.strip()}"
 
         extra: dict = {}
         if req.sampling and req.sampling in _REFINE_SAMPLING_TEMP:

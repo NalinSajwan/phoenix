@@ -2,6 +2,7 @@ import { AGENT_BASE_URL as AGENT_BASE } from './config.js';
 import { calcRunCost } from './constants.js';
 const LOG_STORE_KEY = 'pnx_agent_logs';
 const RUN_STORE_KEY = 'pnx_run_store';
+const DISMISSED_SUGGESTIONS_KEY = 'pnx_dismissed_suggestions';
 
 /** @type {Map<number, {status:'pending'|'idle'|'running'|'cancelled'|'done'|'failed'|'needs_review', step:string, prUrl:string|null, model:string|null, cost:{inputTokens:number,outputTokens:number,estimatedUsd:number,model:string}|null}>} */
 export const runStore = new Map();
@@ -11,6 +12,9 @@ export const logStore = new Map();
 
 /** @type {Map<number, {title:string, description:string, acceptance_criteria:string[]}>} */
 export const suggestionStore = new Map();
+
+/** @type {Set<number>} Issue numbers whose AI suggestion has been dismissed */
+export const dismissedSuggestions = new Set();
 
 const _listeners = new Set();
 
@@ -36,6 +40,12 @@ function _persistRuns() {
   } catch {}
 }
 
+function _persistDismissed() {
+  try {
+    localStorage.setItem(DISMISSED_SUGGESTIONS_KEY, JSON.stringify([...dismissedSuggestions]));
+  } catch {}
+}
+
 // Load persisted state on startup
 (function _loadPersisted() {
   try {
@@ -58,6 +68,12 @@ function _persistRuns() {
       });
     }
   } catch {}
+  try {
+    const rawDismissed = localStorage.getItem(DISMISSED_SUGGESTIONS_KEY);
+    if (rawDismissed) {
+      JSON.parse(rawDismissed).forEach((n) => dismissedSuggestions.add(Number(n)));
+    }
+  } catch {}
 })();
 
 export function clearHistory() {
@@ -66,6 +82,18 @@ export function clearHistory() {
   localStorage.removeItem(LOG_STORE_KEY);
   localStorage.removeItem(RUN_STORE_KEY);
   for (const fn of _listeners) fn(null);
+}
+
+/**
+ * Dismiss the AI suggestion for an issue. Removes it from suggestionStore
+ * and persists the dismissed state so it does not reappear after a page reload.
+ * @param {number} issueNumber
+ */
+export function dismissSuggestion(issueNumber) {
+  dismissedSuggestions.add(issueNumber);
+  suggestionStore.delete(issueNumber);
+  _persistDismissed();
+  for (const fn of _listeners) fn(issueNumber);
 }
 
 /** Active EventSource per issue number — used for cancellation */
@@ -448,6 +476,7 @@ export async function refine(issue, agentConfig = {}) {
         ...(agentConfig.llmApiKey ? { llm_api_key: agentConfig.llmApiKey } : {}),
         ...(agentConfig.llmBaseUrl ? { llm_base_url: agentConfig.llmBaseUrl } : {}),
         ...(agentConfig.systemPrompt ? { system_prompt: agentConfig.systemPrompt } : {}),
+        ...(agentConfig.userPrompt ? { user_prompt: agentConfig.userPrompt } : {}),
         ...(agentConfig.sampling ? { sampling: agentConfig.sampling } : {}),
       }),
     });
