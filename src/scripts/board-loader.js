@@ -1,7 +1,8 @@
-import { fetchAllIssues, createIssue, fetchProjectStatuses, fetchRepoInfo } from '../lib/github-api.js';
+import { fetchAllIssues, createIssue, fetchProjectStatuses, fetchRepoInfo, fetchRepoLabels } from '../lib/github-api.js';
 import { buildColumns, renderBoard, clearCardLaneOverride, isRecentlyMoved } from '../lib/board.js';
 import { loadTriageDuplicates } from '../lib/semantic.js';
 import { AGENT_BASE_URL } from '../lib/config.js';
+import { escHtml } from '../lib/formatters.js';
 import { state } from './state.js';
 import { getLocalIssues, promoteLocalIssue } from '../lib/local-issues.js';
 import { assignColumn } from '../lib/column-mapper.js';
@@ -15,6 +16,159 @@ const emptyState = $('empty-state');
 const loadingState = $('loading-state');
 const errorState = $('error-state');
 const boardWrap = $('board-wrap');
+
+// ── Label autocomplete widget state ──────────────────────────
+let _repoLabels = []; // { name, color }[] from GitHub API
+let _selectedLabels = []; // string[] of currently-selected label names
+
+/** Return '#000000' or '#ffffff' depending on the background brightness. */
+function _labelTextColor(hex) {
+  const r = parseInt(hex.slice(0, 2), 16) || 0;
+  const g = parseInt(hex.slice(2, 4), 16) || 0;
+  const b = parseInt(hex.slice(4, 6), 16) || 0;
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255 > 0.55 ? '#000000' : '#ffffff';
+}
+
+function _renderLabelTags() {
+  const list = $('new-issue-tags-list');
+  const input = $('new-issue-label-input');
+  if (!list || !input) return;
+
+  list.querySelectorAll('.ni-label-tag').forEach((el) => el.remove());
+
+  for (const name of _selectedLabels) {
+    const label = _repoLabels.find((l) => l.name === name) || { name, color: 'c3c6d6' };
+    const bg = `#${label.color}`;
+    const fg = _labelTextColor(label.color);
+
+    const pill = document.createElement('span');
+    pill.className = 'ni-label-tag';
+    pill.style.cssText = `display:inline-flex;align-items:center;gap:3px;background:${bg};color:${fg};padding:2px 5px 2px 7px;border-radius:4px;font-size:11px;font-weight:600;letter-spacing:0.02em;max-width:160px;`;
+
+    const text = document.createElement('span');
+    text.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:130px;';
+    text.textContent = name;
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.dataset.label = name;
+    removeBtn.style.cssText = `display:inline-flex;align-items:center;justify-content:center;background:transparent;border:none;cursor:pointer;color:${fg};opacity:0.7;padding:0;line-height:1;font-size:13px;flex-shrink:0;`;
+    removeBtn.innerHTML = '&times;';
+    removeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      _selectedLabels = _selectedLabels.filter((n) => n !== name);
+      _renderLabelTags();
+      _renderDropdown($('new-issue-label-input')?.value || '');
+    });
+
+    pill.appendChild(text);
+    pill.appendChild(removeBtn);
+    list.insertBefore(pill, input);
+  }
+}
+
+function _renderDropdown(filter) {
+  const dropdown = $('new-issue-labels-dropdown');
+  if (!dropdown) return;
+
+  const q = (filter || '').toLowerCase();
+  const available = _repoLabels.filter(
+    (l) => !_selectedLabels.includes(l.name) && l.name.toLowerCase().includes(q)
+  );
+
+  if (!available.length) {
+    dropdown.classList.add('hidden');
+    dropdown.innerHTML = '';
+    return;
+  }
+
+  dropdown.innerHTML = available
+    .map(
+      (l) => `
+      <button type="button" data-label="${escHtml(l.name)}"
+        class="flex items-center gap-2 w-full px-3 py-1.5 text-left transition-colors hover:bg-surface-container"
+        style="font-size:12px;color:#191c1e;background:transparent;border:none;cursor:pointer;">
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#${escHtml(l.color)};flex-shrink:0;"></span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(l.name)}</span>
+      </button>`
+    )
+    .join('');
+
+  dropdown.querySelectorAll('[data-label]').forEach((btn) => {
+    btn.addEventListener('mousedown', (e) => {
+      // Use mousedown so it fires before the input loses focus
+      e.preventDefault();
+      const name = btn.dataset.label;
+      if (!_selectedLabels.includes(name)) _selectedLabels.push(name);
+      const input = $('new-issue-label-input');
+      if (input) input.value = '';
+      _renderLabelTags();
+      _renderDropdown('');
+      input?.focus();
+    });
+  });
+
+  dropdown.classList.remove('hidden');
+}
+
+function _initLabelWidget() {
+  const widget = $('new-issue-labels-widget');
+  const input = $('new-issue-label-input');
+  const dropdown = $('new-issue-labels-dropdown');
+  if (!widget || !input || !dropdown) return;
+
+  // Clicking anywhere in the widget focuses the text input
+  widget.addEventListener('click', () => input.focus());
+
+  input.addEventListener('focus', () => _renderDropdown(input.value));
+
+  input.addEventListener('input', () => _renderDropdown(input.value));
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Backspace' && input.value === '' && _selectedLabels.length > 0) {
+      _selectedLabels.pop();
+      _renderLabelTags();
+      _renderDropdown('');
+    }
+    if (e.key === 'Escape') {
+      dropdown.classList.add('hidden');
+      input.blur();
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      // Select the first dropdown option if one is visible
+      const first = dropdown.querySelector('[data-label]');
+      if (first) {
+        const name = first.dataset.label;
+        if (!_selectedLabels.includes(name)) _selectedLabels.push(name);
+        input.value = '';
+        _renderLabelTags();
+        _renderDropdown('');
+      }
+    }
+  });
+
+  // Close dropdown when clicking outside the widget
+  document.addEventListener('click', (e) => {
+    if (!widget.contains(e.target) && !dropdown.contains(e.target)) {
+      dropdown.classList.add('hidden');
+    }
+  });
+}
+
+// Focus styling for the label widget (mirrors input:focus box-shadow)
+document.addEventListener('focusin', (e) => {
+  const widget = $('new-issue-labels-widget');
+  if (widget && widget.contains(e.target)) {
+    widget.style.boxShadow = '0 0 0 2px rgba(0,61,155,0.25)';
+  }
+});
+document.addEventListener('focusout', (e) => {
+  const widget = $('new-issue-labels-widget');
+  if (widget && widget.contains(e.target)) {
+    widget.style.boxShadow = '';
+  }
+});
 
 // ── UI state ─────────────────────────────────────────────────
 export function showState(s) {
@@ -376,6 +530,8 @@ async function restoreRepoHistory() {
 
 // ── Event listeners ──────────────────────────────────────────
 export function initBoardLoader() {
+  _initLabelWidget();
+
   $('load-btn').addEventListener('click', () => loadIssues());
   $('repo-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') loadIssues();
@@ -397,14 +553,36 @@ export function initBoardLoader() {
   function openNewIssueModal() {
     $('new-issue-title').value = '';
     $('new-issue-body').value = '';
-    $('new-issue-labels').value = '';
     $('new-issue-error').classList.add('hidden');
+
+    // Reset label widget
+    _selectedLabels = [];
+    _renderLabelTags();
+    $('new-issue-labels-dropdown').classList.add('hidden');
+    const labelInput = $('new-issue-label-input');
+    if (labelInput) labelInput.value = '';
+
     $('new-issue-modal').classList.remove('hidden');
     $('new-issue-title').focus();
+
+    // Fetch repo labels in the background; fall back to issue-derived labels
+    const repo = state.issueSourceRepo || state.repoFullName;
+    if (repo) {
+      fetchRepoLabels(repo)
+        .then((labels) => {
+          _repoLabels = labels.map((l) => ({ name: l.name, color: l.color }));
+        })
+        .catch(() => {
+          const names = new Set();
+          state.allIssues.forEach((i) => (i.labels || []).forEach((l) => names.add(l.name)));
+          _repoLabels = [...names].map((name) => ({ name, color: 'c3c6d6' }));
+        });
+    }
   }
 
   function closeNewIssueModal() {
     $('new-issue-modal').classList.add('hidden');
+    $('new-issue-labels-dropdown').classList.add('hidden');
   }
 
   $('refresh-issues-btn').addEventListener('click', () => {
@@ -425,10 +603,7 @@ export function initBoardLoader() {
   $('new-issue-submit').addEventListener('click', async () => {
     const title = $('new-issue-title').value.trim();
     const body = $('new-issue-body').value.trim();
-    const labels = $('new-issue-labels')
-      .value.split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const labels = [..._selectedLabels];
 
     if (!title) {
       $('new-issue-error').textContent = 'Title is required.';

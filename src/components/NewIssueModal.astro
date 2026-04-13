@@ -48,15 +48,34 @@
       <div>
         <label
           class="block text-[11px] font-semibold text-on-surface-variant uppercase tracking-wider mb-1"
-          >Labels <span class="font-normal normal-case">(comma-separated)</span></label
+          >Labels</label
         >
-        <input
-          id="new-issue-labels"
-          type="text"
-          placeholder="bug, enhancement, …"
-          class="w-full bg-surface-container-lowest px-3 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/40 rounded-lg"
-          style="border:1px solid rgba(195,198,214,0.5)"
-        />
+        <div class="relative">
+          <div
+            id="new-issue-labels-widget"
+            class="w-full bg-surface-container-lowest rounded-lg px-2 py-1.5 flex flex-wrap gap-1 items-center cursor-text min-h-[38px]"
+            style="border:1px solid rgba(195,198,214,0.5)"
+          >
+            <div id="new-issue-tags-list" class="contents">
+              <!-- selected label pills injected here (before the input below) -->
+              <input
+                id="new-issue-label-input"
+                type="text"
+                placeholder="Search labels…"
+                autocomplete="off"
+                class="flex-1 bg-transparent text-sm text-on-surface placeholder:text-on-surface-variant/40 outline-none border-none py-0.5 px-1"
+                style="min-width:100px"
+              />
+            </div>
+          </div>
+          <div
+            id="new-issue-labels-dropdown"
+            class="hidden absolute left-0 right-0 z-10 rounded-lg overflow-hidden shadow-lg"
+            style="top:calc(100% + 4px);background:#fff;border:1px solid rgba(195,198,214,0.5);max-height:200px;overflow-y:auto"
+          >
+            <!-- autocomplete options injected here -->
+          </div>
+        </div>
       </div>
     </div>
 
