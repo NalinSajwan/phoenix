@@ -8,6 +8,7 @@ const browserGlobals = {
   window: 'readonly',
   localStorage: 'readonly',
   fetch: 'readonly',
+  AbortController: 'readonly',
   AbortSignal: 'readonly',
   setTimeout: 'readonly',
   setInterval: 'readonly',
