@@ -12,7 +12,7 @@ import {
   planningPanelOpenSignal,
   openDrawer,
 } from '../lib/signals.js';
-import { bus } from '../lib/event-bus.js';
+import { bus, Events } from '../lib/event-bus.js';
 import { initFavicon } from '../lib/favicon.js';
 
 const $ = (id) => document.getElementById(id);
@@ -31,7 +31,7 @@ initTokenRepo();
 // ── Run updates → board only (islands auto-update via signals) ─
 onRunUpdate(() => {
   if (state.allIssues.length > 0) renderBoard(getFilters);
-  bus.emit('run:update');
+  bus.emit(Events.RUN_UPDATE);
 });
 
 // ── Signal-based panel toggles (Preact islands) ───────────────
@@ -79,7 +79,7 @@ async function checkServices() {
     setHealth('health-semantic-dot', 'health-semantic-label', false, 'offline');
   }
 
-  bus.emit('service:health', { agent: agentOk, semantic: semanticOk });
+  bus.emit(Events.SERVICE_HEALTH, { agent: agentOk, semantic: semanticOk });
 }
 
 checkServices();

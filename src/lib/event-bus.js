@@ -6,10 +6,18 @@
  * touching core modules.
  *
  * Usage:
- *   import { bus } from './event-bus.js';
- *   bus.on('service:health', (data) => { ... });
- *   bus.emit('service:health', { agent: true, semantic: false });
+ *   import { bus, Events } from './event-bus.js';
+ *   bus.on(Events.SERVICE_HEALTH, (data) => { ... });
+ *   bus.emit(Events.SERVICE_HEALTH, { agent: true, semantic: false });
  */
+
+/** Event name constants — use these instead of raw strings. */
+export const Events = Object.freeze({
+  /** Fired after each service health poll. Payload: { agent: boolean, semantic: boolean } */
+  SERVICE_HEALTH: 'service:health',
+  /** Fired when any agent run changes state. No payload. */
+  RUN_UPDATE: 'run:update',
+});
 
 /** @type {Map<string, Set<Function>>} */
 const _subs = new Map();

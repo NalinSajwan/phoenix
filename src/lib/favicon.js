@@ -15,7 +15,7 @@
  *
  * Favicon is an inline SVG data-URI (no external files needed).
  */
-import { bus } from './event-bus.js';
+import { bus, Events } from './event-bus.js';
 import { runStore } from './implementer.js';
 
 const BASE_TITLE = 'Phoenix';
@@ -108,13 +108,13 @@ function refresh() {
 
 export function initFavicon() {
   // Service health updates
-  bus.on('service:health', (data) => {
+  bus.on(Events.SERVICE_HEALTH, (data) => {
     _serviceHealth = { ...data };
     refresh();
   });
 
   // Run status changes
-  bus.on('run:update', () => {
+  bus.on(Events.RUN_UPDATE, () => {
     refresh();
   });
 
