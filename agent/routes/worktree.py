@@ -51,20 +51,34 @@ async def create_worktree(req: WorktreeRequest) -> dict:
 
         # Reuse existing worktree if already created for this issue
         if not worktree_path.exists():
-            branch = f"pnx/issue-{req.issue_number}"
-            # Remove stale branch if it exists
-            await asyncio.create_subprocess_exec(
-                "git", "branch", "-D", branch,
+            base_branch = f"pnx/issue-{req.issue_number}"
+            # Prune stale worktree refs and remove any leftover branch with the same name
+            # so that a previous run doesn't block this one.
+            proc = await asyncio.create_subprocess_exec(
+                "git", "worktree", "prune",
                 cwd=base_dir, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             )
+            await proc.wait()
             proc = await asyncio.create_subprocess_exec(
-                "git", "worktree", "add", "-b", branch,
-                str(worktree_path), f"origin/{req.base_branch}",
-                cwd=base_dir, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+                "git", "branch", "-D", base_branch,
+                cwd=base_dir, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             )
-            _, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                raise HTTPException(500, f"git worktree add failed: {stderr.decode().strip()}")
+            await proc.wait()
+            branch = base_branch
+            for _attempt in range(1, 100):
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "worktree", "add", "-b", branch,
+                    str(worktree_path), f"origin/{req.base_branch}",
+                    cwd=base_dir, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await proc.communicate()
+                if proc.returncode == 0:
+                    break
+                err_msg = stderr.decode().strip()
+                if "already exists" in err_msg and _attempt < 99:
+                    branch = f"{base_branch}-{_attempt + 1}"
+                    continue
+                raise HTTPException(500, f"git worktree add failed: {err_msg}")
 
     asyncio.create_task(
         asyncio.create_subprocess_exec(
