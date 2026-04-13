@@ -8,6 +8,7 @@ export const state = {
   repoFullName: '',
   duplicates: new Map(), // issueNumber → DuplicateCandidate[]
   repos: [], // fetched repo list from /user/repos
+  projectMeta: null, // { projectId, statusFieldId, statusOptions: Map<name, optionId> } — set when a GitHub Project with a Status field is found
   onOpenDrawer: null,
   onImplement: null,
 };

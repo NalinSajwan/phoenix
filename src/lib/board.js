@@ -1,10 +1,10 @@
-import { COLUMNS } from './constants.js';
+import { COLUMNS, LABEL_MAP, COLUMN_STATUS_LABELS } from './constants.js';
 import { escHtml, timeAgo, detectPriority, priorityIcon } from './formatters.js';
 import { assignColumn } from './column-mapper.js';
 import { runStore, refine, cancelRun, pushRun } from './implementer.js';
 import { getLaneAction, getCodeEditor } from './agents.js';
 import { AGENT_BASE_URL as AGENT_BASE } from './config.js';
-import { createIssue } from './github-api.js';
+import { createIssue, updateIssue, ensureRepoLabel, updateProjectItemStatus } from './github-api.js';
 
 // ── Board toast ────────────────────────────────────────────────────────────────
 function _showToast(msg) {
@@ -47,6 +47,90 @@ function _saveCardLane(repo, issueNumber, columnId) {
 
 export function clearCardLanes() {
   localStorage.removeItem(CARD_LANES_KEY);
+}
+
+/** Remove a single card's persisted lane override (called when GitHub wins). */
+export function clearCardLaneOverride(repo, issueNumber) {
+  const all = _getCardLanes();
+  if (all[repo]) {
+    delete all[repo][String(issueNumber)];
+    try {
+      localStorage.setItem(CARD_LANES_KEY, JSON.stringify(all));
+    } catch {}
+  }
+}
+
+// ── Recently-moved guard (prevents polling from fighting a just-dragged card) ─
+const _recentlyMoved = new Map(); // issue number → timestamp
+const RECENTLY_MOVED_TTL_MS = 15_000;
+
+/** Returns true if the issue was moved locally within the last 15 seconds. */
+export function isRecentlyMoved(num) {
+  const ts = _recentlyMoved.get(num);
+  return Boolean(ts && Date.now() - ts < RECENTLY_MOVED_TTL_MS);
+}
+
+// ── Helpers for status-label detection ───────────────────────
+function _isStatusLabel(labelName) {
+  const lower = labelName.toLowerCase();
+  return LABEL_MAP.some(({ keywords }) => keywords.some((k) => lower.includes(k)));
+}
+
+/** Find the best-matching status option name for a column from the project's available options. */
+function _columnToProjectStatusName(col, statusOptions) {
+  if (col === 'triage') return null; // clear status
+  const { keywords } = LABEL_MAP.find(({ col: c }) => c === col) ?? {};
+  if (!keywords) return null;
+  for (const [name] of statusOptions) {
+    const lower = name.toLowerCase();
+    if (keywords.some((k) => lower.includes(k))) return name;
+  }
+  return null;
+}
+
+async function _syncStatusToGitHub(num, toCol) {
+  if (!_state.repoFullName) return;
+  if (!localStorage.getItem('gh_token')) return; // no token → silently skip
+
+  const issue = _state.allIssues.find((i) => i.number === num);
+  if (!issue || issue._local) return;
+
+  // ── Prefer GitHub Projects v2 status update ───────────────
+  const ps = issue._projectStatus;
+  const meta = _state.projectMeta;
+  if (ps?.itemId && meta?.projectId) {
+    try {
+      const targetName = _columnToProjectStatusName(toCol, meta.statusOptions);
+      const targetOptionId = targetName ? (meta.statusOptions.get(targetName) ?? null) : null;
+      await updateProjectItemStatus(ps.projectId, ps.itemId, ps.fieldId, targetOptionId);
+      const idx = _state.allIssues.findIndex((i) => i.number === num);
+      if (idx !== -1) {
+        _state.allIssues[idx] = {
+          ..._state.allIssues[idx],
+          _projectStatus: { ...ps, statusName: targetName, optionId: targetOptionId },
+        };
+      }
+    } catch (err) {
+      _showToast(`Couldn't sync #${num} to GitHub: ${err.userMessage || err.message}`);
+    }
+    return;
+  }
+
+  // ── Fall back to label-based sync ─────────────────────────
+  const targetLabel = COLUMN_STATUS_LABELS[toCol]; // null for triage
+  const nonStatusLabels = (issue.labels || [])
+    .filter((l) => !_isStatusLabel(l.name))
+    .map((l) => l.name);
+  const newLabels = targetLabel ? [...nonStatusLabels, targetLabel.name] : nonStatusLabels;
+
+  try {
+    if (targetLabel) await ensureRepoLabel(_state.repoFullName, targetLabel);
+    const updated = await updateIssue(_state.repoFullName, num, { labels: newLabels });
+    const idx = _state.allIssues.findIndex((i) => i.number === num);
+    if (idx !== -1) _state.allIssues[idx] = { ..._state.allIssues[idx], labels: updated.labels };
+  } catch (err) {
+    _showToast(`Couldn't sync #${num} to GitHub: ${err.userMessage || err.message}`);
+  }
 }
 
 let _state = null;
@@ -486,6 +570,8 @@ function moveCard(num, from, to, getFilters) {
   renderBoard(getFilters);
   // Persist card lane override so position survives restart
   if (_state.repoFullName) _saveCardLane(_state.repoFullName, num, to);
+  // Mark as recently moved so the background poll doesn't fight this change
+  _recentlyMoved.set(num, Date.now());
   // Log movement to SQLite (fire-and-forget)
   if (_state.repoFullName) {
     fetch(`${AGENT_BASE}/movements`, {
@@ -499,6 +585,8 @@ function moveCard(num, from, to, getFilters) {
       }),
     }).catch(() => {});
   }
+  // Sync status label to GitHub (fire-and-forget)
+  _syncStatusToGitHub(num, to);
 }
 
 export function applyFilters(issues, { search, label, assignee }) {

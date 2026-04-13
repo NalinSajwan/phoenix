@@ -13,6 +13,16 @@ export const LABEL_MAP = [
   { keywords: ['done', 'completed', 'released', 'closed', 'merged'], col: 'done' },
 ];
 
+// Canonical GitHub label (name + color) written back when a card is moved.
+// `triage` has no status label — any existing status labels are stripped.
+export const COLUMN_STATUS_LABELS = {
+  triage:      null,
+  todo:        { name: 'to do',       color: '4c5e83' },
+  in_progress: { name: 'in progress', color: '003d9b' },
+  in_review:   { name: 'in review',   color: '7b2600' },
+  done:        { name: 'done',        color: '1a7a4a' },
+};
+
 export const PROVIDERS = {
   claude: {
     name: 'Claude (Anthropic)',

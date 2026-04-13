@@ -6,6 +6,138 @@ function buildHeaders(token) {
   };
 }
 
+async function graphqlRequest(query, variables) {
+  const token = localStorage.getItem('gh_token');
+  if (!token) return null;
+  const res = await fetch('https://api.github.com/graphql', {
+    method: 'POST',
+    headers: { ...buildHeaders(token), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, variables }),
+  });
+  if (!res.ok) throw await parseGitHubError(res);
+  const json = await res.json();
+  if (json.errors?.length) {
+    const err = new Error(json.errors[0].message);
+    err.userMessage = json.errors[0].message;
+    throw err;
+  }
+  return json.data;
+}
+
+const _PROJECT_STATUS_QUERY = `
+  query($owner: String!, $name: String!) {
+    repository(owner: $owner, name: $name) {
+      projectsV2(first: 5, orderBy: { field: UPDATED_AT, direction: DESC }) {
+        nodes {
+          id
+          title
+          statusField: field(name: "Status") {
+            ... on ProjectV2SingleSelectField {
+              id
+              options { id name }
+            }
+          }
+          items(first: 100) {
+            nodes {
+              id
+              content {
+                ... on Issue {
+                  number
+                  repository { nameWithOwner }
+                }
+              }
+              fieldValues(first: 10) {
+                nodes {
+                  ... on ProjectV2ItemFieldSingleSelectValue {
+                    name
+                    optionId
+                    field {
+                      ... on ProjectV2SingleSelectField { name }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+/**
+ * Fetch GitHub Projects v2 status for all issues in a repo.
+ * Returns null if no token, no project, or on error (silently degrades).
+ * Returns { itemsByIssueNumber, projectId, statusFieldId, statusOptions }.
+ */
+export async function fetchProjectStatuses(repo) {
+  const token = localStorage.getItem('gh_token');
+  if (!token) return null;
+
+  const [owner, name] = repo.split('/');
+  let data;
+  try {
+    data = await graphqlRequest(_PROJECT_STATUS_QUERY, { owner, name });
+  } catch {
+    return null;
+  }
+
+  const projects = data?.repository?.projectsV2?.nodes ?? [];
+  const project = projects.find((p) => p.statusField?.id);
+  if (!project) return null;
+
+  const itemsByIssueNumber = new Map();
+  for (const item of project.items.nodes) {
+    const issue = item.content;
+    if (!issue?.number) continue;
+    if (issue.repository?.nameWithOwner !== repo) continue;
+    const statusFv = item.fieldValues.nodes.find(
+      (fv) => fv.field?.name?.toLowerCase() === 'status'
+    );
+    itemsByIssueNumber.set(issue.number, {
+      statusName: statusFv?.name ?? null,
+      optionId: statusFv?.optionId ?? null,
+      itemId: item.id,
+      projectId: project.id,
+      fieldId: project.statusField.id,
+    });
+  }
+
+  return {
+    itemsByIssueNumber,
+    projectId: project.id,
+    statusFieldId: project.statusField.id,
+    statusOptions: new Map((project.statusField.options ?? []).map((o) => [o.name, o.id])),
+  };
+}
+
+/**
+ * Update a GitHub Projects v2 item's Status field via GraphQL mutation.
+ * Pass optionId = null to clear the status.
+ */
+export async function updateProjectItemStatus(projectId, itemId, fieldId, optionId) {
+  if (optionId === null) {
+    await graphqlRequest(
+      `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!) {
+         clearProjectV2ItemFieldValue(input: {
+           projectId: $projectId itemId: $itemId fieldId: $fieldId
+         }) { projectV2Item { id } }
+       }`,
+      { projectId, itemId, fieldId }
+    );
+  } else {
+    await graphqlRequest(
+      `mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+         updateProjectV2ItemFieldValue(input: {
+           projectId: $projectId itemId: $itemId fieldId: $fieldId
+           value: { singleSelectOptionId: $optionId }
+         }) { projectV2Item { id } }
+       }`,
+      { projectId, itemId, fieldId, optionId }
+    );
+  }
+}
+
 async function parseGitHubError(res) {
   let payload = null;
 
@@ -247,6 +379,23 @@ export async function fetchRepoLabels(repo) {
   const res = await fetch(url, { headers: buildHeaders(token) });
   if (!res.ok) throw await parseGitHubError(res);
   return res.json();
+}
+
+/**
+ * Create a label if it does not already exist in the repository.
+ * Silently succeeds when the label already exists (GitHub returns 422).
+ */
+export async function ensureRepoLabel(repo, { name, color }) {
+  const token = localStorage.getItem('gh_token');
+  const url = `https://api.github.com/repos/${repo}/labels`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { ...buildHeaders(token), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, color }),
+  });
+  // 422 = label already exists — that's fine
+  if (res.ok || res.status === 422) return;
+  throw await parseGitHubError(res);
 }
 
 /**

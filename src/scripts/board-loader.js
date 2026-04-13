@@ -1,9 +1,10 @@
-import { fetchAllIssues, createIssue } from '../lib/github-api.js';
-import { buildColumns, renderBoard } from '../lib/board.js';
+import { fetchAllIssues, createIssue, fetchProjectStatuses } from '../lib/github-api.js';
+import { buildColumns, renderBoard, clearCardLaneOverride, isRecentlyMoved } from '../lib/board.js';
 import { loadTriageDuplicates } from '../lib/semantic.js';
 import { AGENT_BASE_URL } from '../lib/config.js';
 import { state } from './state.js';
 import { getLocalIssues, promoteLocalIssue } from '../lib/local-issues.js';
+import { assignColumn } from '../lib/column-mapper.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -73,6 +74,100 @@ export function populateFilters() {
   });
 }
 
+// ── GitHub → App polling ─────────────────────────────────────
+const POLL_INTERVAL_MS = 30_000;
+let _pollTimer = null;
+
+function _stopPolling() {
+  if (_pollTimer) {
+    clearInterval(_pollTimer);
+    _pollTimer = null;
+  }
+}
+
+async function _pollGitHubChanges(repo) {
+  // Bail if the user has switched away from this repo
+  if (!state.repoFullName || state.repoFullName !== repo) {
+    _stopPolling();
+    return;
+  }
+
+  let freshIssues;
+  try {
+    freshIssues = await fetchAllIssues(repo);
+  } catch {
+    return; // silently ignore transient errors
+  }
+
+  let changed = false;
+  const existingByNumber = new Map(
+    state.allIssues.filter((i) => !i._local).map((i) => [i.number, i])
+  );
+
+  // Detect label changes on existing issues
+  for (const fresh of freshIssues) {
+    if (isRecentlyMoved(fresh.number)) continue; // user just dragged — skip
+
+    const existing = existingByNumber.get(fresh.number);
+    if (!existing) {
+      // New issue appeared on GitHub — add it
+      state.allIssues.push(fresh);
+      changed = true;
+      continue;
+    }
+
+    const existingLabels = (existing.labels || []).map((l) => l.name).sort().join(',');
+    const freshLabels = (fresh.labels || []).map((l) => l.name).sort().join(',');
+    if (existingLabels !== freshLabels) {
+      const idx = state.allIssues.indexOf(existing);
+      // Preserve _projectStatus when updating labels
+      state.allIssues[idx] = { ...existing, labels: fresh.labels };
+
+      const newCol = assignColumn(state.allIssues[idx]);
+      const oldCol = assignColumn(existing);
+      if (newCol !== oldCol) clearCardLaneOverride(repo, fresh.number);
+
+      changed = true;
+    }
+  }
+
+  // Detect project status changes (only if a project was found on load)
+  if (state.projectMeta) {
+    const projectData = await fetchProjectStatuses(repo).catch(() => null);
+    if (projectData) {
+      state.projectMeta = {
+        projectId: projectData.projectId,
+        statusFieldId: projectData.statusFieldId,
+        statusOptions: projectData.statusOptions,
+      };
+      for (const [issueNumber, newStatus] of projectData.itemsByIssueNumber) {
+        if (isRecentlyMoved(issueNumber)) continue;
+        const existing = existingByNumber.get(issueNumber);
+        if (!existing) continue;
+        if (existing._projectStatus?.statusName === newStatus.statusName) continue;
+        const idx = state.allIssues.findIndex((i) => i.number === issueNumber);
+        if (idx !== -1) {
+          const oldCol = assignColumn(state.allIssues[idx]);
+          state.allIssues[idx] = { ...state.allIssues[idx], _projectStatus: newStatus };
+          const newCol = assignColumn(state.allIssues[idx]);
+          if (newCol !== oldCol) clearCardLaneOverride(repo, issueNumber);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  if (changed) {
+    buildColumns();
+    renderBoard(getFilters);
+  }
+}
+
+function _startPolling(repo) {
+  _stopPolling();
+  _pollTimer = setInterval(() => _pollGitHubChanges(repo), POLL_INTERVAL_MS);
+}
+
 // ── Load issues ──────────────────────────────────────────────
 export async function loadIssues(repoArg) {
   const repo = repoArg || $('repo-input').value.trim();
@@ -88,10 +183,33 @@ export async function loadIssues(repoArg) {
   try {
     state.allIssues = [...getLocalIssues(repo), ...await fetchAllIssues(repo)];
     state.duplicates = new Map();
+    state.projectMeta = null;
     buildColumns();
     populateFilters();
     renderBoard(getFilters);
     showState('board');
+
+    // Fetch GitHub Projects v2 status in the background and re-render if found
+    fetchProjectStatuses(repo).then((projectData) => {
+      if (!projectData || state.repoFullName !== repo) return;
+      state.projectMeta = {
+        projectId: projectData.projectId,
+        statusFieldId: projectData.statusFieldId,
+        statusOptions: projectData.statusOptions,
+      };
+      let changed = false;
+      projectData.itemsByIssueNumber.forEach((status, issueNumber) => {
+        const idx = state.allIssues.findIndex((i) => i.number === issueNumber);
+        if (idx !== -1) {
+          state.allIssues[idx] = { ...state.allIssues[idx], _projectStatus: status };
+          changed = true;
+        }
+      });
+      if (changed) {
+        buildColumns();
+        renderBoard(getFilters);
+      }
+    });
     $('board-repo').textContent = repo;
     $('stat-open').textContent = `${state.allIssues.length} open issues`;
     statsBar.classList.remove('hidden');
@@ -140,6 +258,9 @@ export async function loadIssues(repoArg) {
         }
       });
     }
+
+    // Start polling for GitHub-side changes (bidirectional sync)
+    _startPolling(repo);
   } catch (err) {
     showState('error');
     $('error-text').textContent = err.message || 'Failed to fetch issues';
