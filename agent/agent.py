@@ -690,10 +690,24 @@ class ImplementerAgent:
                             wt_path = None
                 # Delete the stale target branch (ignore failure when absent).
                 await self._git("branch", "-D", result.branch_name, cwd=self._base_dir)
-                code, err = await self._git("branch", "-m", self._worktree_branch, result.branch_name)
+                target = result.branch_name
+                code, err = await self._git("branch", "-m", self._worktree_branch, target)
                 if code != 0:
-                    raise RuntimeError(f"git branch -m: {err}")
-                current_branch = result.branch_name
+                    if "already exists" in err:
+                        # Cleanup wasn't enough — fall back to a suffixed name.
+                        counter = 2
+                        while counter <= 99:
+                            candidate = f"{result.branch_name}-{counter}"
+                            code, err = await self._git("branch", "-m", self._worktree_branch, candidate)
+                            if code == 0:
+                                target = candidate
+                                break
+                            counter += 1
+                        else:
+                            raise RuntimeError(f"git branch -m: {err}")
+                    else:
+                        raise RuntimeError(f"git branch -m: {err}")
+                current_branch = target
 
         self._worktree_branch = current_branch
         result.branch_name = current_branch
