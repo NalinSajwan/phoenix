@@ -17,7 +17,7 @@ import {
   suggestionStore,
   logDelegation,
 } from '../lib/implementer.js';
-import { getAgents, getTeams, getIssueTeam, getGlobalAiKey } from '../lib/agents.js';
+import { getAgents, getTeams, getIssueTeam, getGlobalAiKey, getAgentMaxIterations } from '../lib/agents.js';
 import { moveCard } from '../lib/board.js';
 import { getFilters } from './board-loader.js';
 import { state } from './state.js';
@@ -51,6 +51,7 @@ function _agentConfig(agent, team = null) {
     agentName: agent.name || agent.id,
     agentModel: agent.model || agent.provider,
     agentActionType: agent.actionType || 'implement',
+    maxIterations: getAgentMaxIterations(),
     teamName: team?.name || null,
     teamMode: team?.mode || null,
   };
