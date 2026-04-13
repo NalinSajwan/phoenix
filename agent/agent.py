@@ -250,18 +250,31 @@ class ImplementerAgent:
 
             # Create an isolated worktree on a new branch.
             # The worktree directory must not exist yet — git creates it.
-            worktree_branch = f"pnx/{self.run_id[:8]}"
+            base_worktree_branch = f"pnx/{self.run_id[:8]}"
             worktree_path = Path(tempfile.gettempdir()) / f"pnx-{self.run_id[:8]}"
-            proc = await asyncio.create_subprocess_exec(
-                "git", "worktree", "add", "-b", worktree_branch,
-                str(worktree_path), f"origin/{self.request.base_branch}",
-                cwd=base_dir,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                raise RuntimeError(f"git worktree add failed: {stderr.decode().strip()}")
+
+            # Prune stale worktree refs and remove any leftover branch with the same name
+            # so that a crashed previous run doesn't block this one.
+            await self._git("worktree", "prune", cwd=base_dir)
+            await self._git("branch", "-D", base_worktree_branch, cwd=base_dir)
+
+            worktree_branch = base_worktree_branch
+            for _attempt in range(1, 100):
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "worktree", "add", "-b", worktree_branch,
+                    str(worktree_path), f"origin/{self.request.base_branch}",
+                    cwd=base_dir,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await proc.communicate()
+                if proc.returncode == 0:
+                    break
+                err_msg = stderr.decode().strip()
+                if "already exists" in err_msg and _attempt < 99:
+                    worktree_branch = f"{base_worktree_branch}-{_attempt + 1}"
+                    continue
+                raise RuntimeError(f"git worktree add failed: {err_msg}")
 
         self.work_dir = worktree_path
         self._base_dir = base_dir
