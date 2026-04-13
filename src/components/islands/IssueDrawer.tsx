@@ -931,10 +931,22 @@ function DetailsTab({ issue }: { issue: Issue }) {
       '',
       suggestion.description,
       '',
-      '### Acceptance Criteria',
-      ...(suggestion.acceptance_criteria ?? []).map((c: string) => `- [ ] ${c}`),
+      ...(suggestion.acceptance_criteria?.length
+        ? ['### Acceptance Criteria', ...(suggestion.acceptance_criteria as string[]).map((c) => `- [ ] ${c}`)]
+        : []),
     ].join('\n');
-    await navigator.clipboard.writeText(md);
+    try {
+      await navigator.clipboard.writeText(md);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = md;
+      ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
     setCopyLabel('Copied!');
     setTimeout(() => setCopyLabel('Copy Markdown'), 1500);
   }
