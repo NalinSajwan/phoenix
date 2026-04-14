@@ -46,6 +46,9 @@ function _persistDismissed() {
   } catch {}
 }
 
+/** Issue numbers whose runs were still active when the page was last unloaded. */
+const _pendingReconnects = [];
+
 // Load persisted state on startup
 (function _loadPersisted() {
   try {
@@ -60,9 +63,17 @@ function _persistDismissed() {
     if (rawRuns) {
       const data = JSON.parse(rawRuns);
       Object.entries(data).forEach(([k, v]) => {
-        // pending or running at startup means the session was interrupted
-        if (v.status === 'running' || v.status === 'pending') {
+        if (v.status === 'pending') {
+          // Never got a run_id — definitely interrupted
           v = { ...v, status: 'failed', step: 'Interrupted' };
+        } else if (v.status === 'running') {
+          if (v.runId) {
+            // Agent may still be running server-side; reconnect after module load
+            _pendingReconnects.push(Number(k));
+          } else {
+            // Old format without runId — cannot reconnect
+            v = { ...v, status: 'failed', step: 'Interrupted' };
+          }
         }
         runStore.set(Number(k), v);
       });
@@ -75,6 +86,12 @@ function _persistDismissed() {
     }
   } catch {}
 })();
+
+// After all module-level initialisation, attempt to reconnect any runs that
+// were still active when the browser last navigated away or refreshed.
+if (_pendingReconnects.length > 0) {
+  Promise.resolve().then(() => Promise.all(_pendingReconnects.map(_reconnectRun)));
+}
 
 export function clearHistory() {
   logStore.clear();
@@ -266,171 +283,362 @@ export async function implement(issue, repoFullName, agentConfig = {}) {
     return;
   }
 
-  function _openStream(url) {
-    const es = new EventSource(url);
-    _eventSources.set(n, es);
-    let errorStreak = 0;
+  // Store runId so we can reconnect after a page refresh
+  const _runId = streamUrl.split('/').filter(Boolean).at(-2);
+  _set(n, { ...runStore.get(n), runId: _runId });
+  _openStream(n, `${endpoint}${streamUrl}`);
+}
 
-    es.onmessage = (e) => {
-      errorStreak = 0; // reset on any successful message
-      const event = JSON.parse(e.data);
-      const cur = runStore.get(n) ?? { status: 'running', step: '', prUrl: null };
+// ── SSE stream handler (shared by implement and reconnect) ────
 
-      switch (event.type) {
-        case 'progress':
-          if (event.data.step === 'thinking') {
-            // Heartbeat — update step text but keep log entry in-place
-            _set(n, { ...cur, step: event.data.message });
-            _log(n, { type: 'thinking', message: event.data.message });
-          } else {
-            _set(n, {
-              ...cur,
-              step: event.data.message,
-              worktreePath: event.data.worktree_path ?? cur.worktreePath ?? null,
-            });
-            _log(n, { type: 'progress', message: event.data.message });
-          }
-          break;
-        case 'reasoning':
-          _set(n, { ...cur, step: 'Thinking…' });
-          _log(n, { type: 'reasoning', message: event.data.content ?? 'Thinking…' });
-          break;
-        case 'tool_call':
-          _set(n, { ...cur, step: `${event.data.tool}: ${event.data.path ?? ''}`.trimEnd() });
-          _log(n, {
-            type: 'tool_call',
-            message: event.data.tool,
-            tool: event.data.tool,
-            path: event.data.path ?? '',
-          });
-          break;
-        case 'tool_result': {
-          // Strip ANSI escape codes, then show first meaningful line + line count
-          // eslint-disable-next-line no-control-regex
-          const clean = (event.data.output ?? '').replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').trim();
-          const lines = clean.split('\n').filter((l) => l.trim());
-          const firstLine = (lines[0] ?? '').slice(0, 140);
-          const extra = lines.length > 1 ? `  (+${lines.length - 1} lines)` : '';
-          if (firstLine) _log(n, { type: 'tool_result', message: firstLine + extra });
-          break;
-        }
-        case 'needs_review':
-          _set(n, {
+/**
+ * Open an EventSource for a running agent run.
+ *
+ * @param {number} issueNumber
+ * @param {string} url            Full URL to the SSE stream endpoint
+ * @param {number} [skipBeforeTs] Skip events with a timestamp at-or-before this
+ *                                value (ms since epoch).  Used during reconnect
+ *                                to avoid replaying events already loaded from DB.
+ */
+function _openStream(issueNumber, url, skipBeforeTs = 0) {
+  const es = new EventSource(url);
+  _eventSources.set(issueNumber, es);
+  let errorStreak = 0;
+
+  es.onmessage = (e) => {
+    errorStreak = 0;
+    const event = JSON.parse(e.data);
+
+    // Skip events already replayed from DB logs during a post-refresh reconnect
+    if (skipBeforeTs > 0 && event.timestamp) {
+      if (new Date(event.timestamp).getTime() <= skipBeforeTs) return;
+    }
+
+    const cur = runStore.get(issueNumber) ?? { status: 'running', step: '', prUrl: null };
+
+    switch (event.type) {
+      case 'progress':
+        if (event.data.step === 'thinking') {
+          _set(issueNumber, { ...cur, step: event.data.message });
+          _log(issueNumber, { type: 'thinking', message: event.data.message });
+        } else {
+          _set(issueNumber, {
             ...cur,
-            status: 'needs_review',
-            step: 'Ready to push',
-            prUrl: null,
-            runId: event.data.run_id,
-            branch: event.data.branch,
+            step: event.data.message,
             worktreePath: event.data.worktree_path ?? cur.worktreePath ?? null,
           });
-          _log(n, {
-            type: 'done',
-            message: `Changes committed on ${event.data.branch} — ready to push`,
-          });
-          es.close();
-          _eventSources.delete(n);
-          break;
-        case 'complete': {
-          const usage = event.data.usage;
-          const cost = usage
-            ? {
-                inputTokens: usage.input_tokens ?? 0,
-                outputTokens: usage.output_tokens ?? 0,
-                estimatedUsd: calcRunCost(usage.input_tokens ?? 0, usage.output_tokens ?? 0, cur.model ?? ''),
-                model: cur.model ?? '',
-              }
-            : cur.cost ?? null;
-          if (event.data.pr_pending) {
-            // Branch pushed; PR is being created in background — poll status for pr_url
-            _set(n, { ...cur, status: 'done', step: 'PR being created…', prUrl: null, cost });
-            _log(n, {
-              type: 'done',
-              message: `Branch pushed (${event.data.branch}) — PR being created in background…`,
-            });
-            _pollForPr(n, _runId, endpoint);
-          } else {
-            _set(n, {
-              ...cur,
-              status: 'done',
-              step: 'PR opened',
-              prUrl: event.data.pr_url ?? null,
-              cost,
-            });
-            _log(n, { type: 'done', message: `PR opened → ${event.data.pr_url ?? ''}` });
-          }
-          es.close();
-          _eventSources.delete(n);
-          break;
+          _log(issueNumber, { type: 'progress', message: event.data.message });
         }
-        case 'error':
-          _set(n, { status: 'failed', step: event.data.message, prUrl: null });
-          _log(n, { type: 'error', message: event.data.message });
-          es.close();
-          _eventSources.delete(n);
-          break;
-        case 'close':
-          if (cur?.status === 'running') {
-            _set(n, { ...cur, status: 'failed', step: 'Agent stopped unexpectedly', prUrl: null });
-            _log(n, { type: 'error', message: 'Agent run ended without completing' });
-          }
-          es.close();
-          _eventSources.delete(n);
-          break;
-      }
-    };
-
-    es.onerror = () => {
-      const cur = runStore.get(n);
-      if (cur?.status !== 'running') return; // already terminal — do nothing
-      errorStreak++;
-
-      if (errorStreak <= 5) {
-        // Transient drop (proxy timeout, blip) — browser will auto-reconnect.
-        // Just update the step label so the user sees what's happening.
-        _set(n, { ...cur, step: `Reconnecting… (attempt ${errorStreak})` });
-        _log(n, { type: 'thinking', message: `SSE reconnecting… (attempt ${errorStreak})` });
-        return; // do NOT close — let EventSource auto-retry
-      }
-
-      // 5 consecutive errors — check server status before giving up
-      es.close();
-      _eventSources.delete(n);
-      fetch(`${endpoint}/runs/${_runId}/status`)
-        .then((r) => r.json())
-        .then((status) => {
-          const latest = runStore.get(n);
-          if (status.status === 'complete') {
-            if (status.pr_url) {
-              _set(n, { ...latest, status: 'done', step: 'PR opened', prUrl: status.pr_url });
-              _log(n, { type: 'done', message: `PR opened → ${status.pr_url}` });
-            } else {
-              _set(n, { ...latest, status: 'done', step: 'PR being created…', prUrl: null });
-              _log(n, { type: 'done', message: 'Branch pushed — PR being created in background…' });
-              _pollForPr(n, _runId, endpoint);
-            }
-          } else if (status.status === 'running') {
-            // Server says still running — reconnect once more with fresh EventSource
-            _log(n, { type: 'thinking', message: 'Reconnecting after repeated drops…' });
-            _openStream(url);
-          } else {
-            _set(n, { status: 'failed', step: status.error || 'Connection lost', prUrl: null });
-            _log(n, { type: 'error', message: status.error || 'SSE connection lost' });
-          }
-        })
-        .catch(() => {
-          const latest = runStore.get(n);
-          if (latest?.status === 'running') {
-            _set(n, { status: 'failed', step: 'Connection lost', prUrl: null });
-            _log(n, { type: 'error', message: 'SSE connection lost — server unreachable' });
-          }
+        break;
+      case 'reasoning':
+        _set(issueNumber, { ...cur, step: 'Thinking…' });
+        _log(issueNumber, { type: 'reasoning', message: event.data.content ?? 'Thinking…' });
+        break;
+      case 'tool_call':
+        _set(issueNumber, { ...cur, step: `${event.data.tool}: ${event.data.path ?? ''}`.trimEnd() });
+        _log(issueNumber, {
+          type: 'tool_call',
+          message: event.data.tool,
+          tool: event.data.tool,
+          path: event.data.path ?? '',
         });
-    };
-  }
+        break;
+      case 'tool_result': {
+        // Strip ANSI escape codes, then show first meaningful line + line count
+        // eslint-disable-next-line no-control-regex
+        const clean = (event.data.output ?? '').replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').trim();
+        const lines = clean.split('\n').filter((l) => l.trim());
+        const firstLine = (lines[0] ?? '').slice(0, 140);
+        const extra = lines.length > 1 ? `  (+${lines.length - 1} lines)` : '';
+        if (firstLine) _log(issueNumber, { type: 'tool_result', message: firstLine + extra });
+        break;
+      }
+      case 'needs_review':
+        _set(issueNumber, {
+          ...cur,
+          status: 'needs_review',
+          step: 'Ready to push',
+          prUrl: null,
+          runId: event.data.run_id,
+          branch: event.data.branch,
+          worktreePath: event.data.worktree_path ?? cur.worktreePath ?? null,
+        });
+        _log(issueNumber, {
+          type: 'done',
+          message: `Changes committed on ${event.data.branch} — ready to push`,
+        });
+        es.close();
+        _eventSources.delete(issueNumber);
+        break;
+      case 'complete': {
+        const usage = event.data.usage;
+        const cost = usage
+          ? {
+              inputTokens: usage.input_tokens ?? 0,
+              outputTokens: usage.output_tokens ?? 0,
+              estimatedUsd: calcRunCost(usage.input_tokens ?? 0, usage.output_tokens ?? 0, cur.model ?? ''),
+              model: cur.model ?? '',
+            }
+          : cur.cost ?? null;
+        const runId = cur.runId;
+        const endpoint = cur._endpoint ?? AGENT_BASE;
+        if (event.data.pr_pending) {
+          // Branch pushed; PR is being created in background — poll status for pr_url
+          _set(issueNumber, { ...cur, status: 'done', step: 'PR being created…', prUrl: null, cost });
+          _log(issueNumber, {
+            type: 'done',
+            message: `Branch pushed (${event.data.branch}) — PR being created in background…`,
+          });
+          _pollForPr(issueNumber, runId, endpoint);
+        } else {
+          _set(issueNumber, {
+            ...cur,
+            status: 'done',
+            step: 'PR opened',
+            prUrl: event.data.pr_url ?? null,
+            cost,
+          });
+          _log(issueNumber, { type: 'done', message: `PR opened → ${event.data.pr_url ?? ''}` });
+        }
+        es.close();
+        _eventSources.delete(issueNumber);
+        break;
+      }
+      case 'error':
+        _set(issueNumber, { status: 'failed', step: event.data.message, prUrl: null });
+        _log(issueNumber, { type: 'error', message: event.data.message });
+        es.close();
+        _eventSources.delete(issueNumber);
+        break;
+      case 'close':
+        if (cur?.status === 'running') {
+          _set(issueNumber, { ...cur, status: 'failed', step: 'Agent stopped unexpectedly', prUrl: null });
+          _log(issueNumber, { type: 'error', message: 'Agent run ended without completing' });
+        }
+        es.close();
+        _eventSources.delete(issueNumber);
+        break;
+    }
+  };
 
-  // Extract run_id from the stream URL for status checks
-  const _runId = streamUrl.split('/').filter(Boolean).at(-2);
-  _openStream(`${endpoint}${streamUrl}`);
+  es.onerror = () => {
+    const cur = runStore.get(issueNumber);
+    if (cur?.status !== 'running') return; // already terminal — do nothing
+    errorStreak++;
+
+    if (errorStreak <= 5) {
+      // Transient drop (proxy timeout, network blip) — browser will auto-reconnect.
+      _set(issueNumber, { ...cur, step: `Reconnecting… (attempt ${errorStreak})` });
+      _log(issueNumber, { type: 'thinking', message: `SSE reconnecting… (attempt ${errorStreak})` });
+      return; // do NOT close — let EventSource auto-retry
+    }
+
+    // 5 consecutive errors — check server status before giving up
+    es.close();
+    _eventSources.delete(issueNumber);
+    const runId = cur.runId;
+    const endpoint = cur._endpoint ?? AGENT_BASE;
+    fetch(`${endpoint}/runs/${runId}/status`)
+      .then((r) => r.json())
+      .then((status) => {
+        const latest = runStore.get(issueNumber);
+        if (status.status === 'complete') {
+          if (status.pr_url) {
+            _set(issueNumber, { ...latest, status: 'done', step: 'PR opened', prUrl: status.pr_url });
+            _log(issueNumber, { type: 'done', message: `PR opened → ${status.pr_url}` });
+          } else {
+            _set(issueNumber, { ...latest, status: 'done', step: 'PR being created…', prUrl: null });
+            _log(issueNumber, { type: 'done', message: 'Branch pushed — PR being created in background…' });
+            _pollForPr(issueNumber, runId, endpoint);
+          }
+        } else if (status.status === 'running') {
+          // Server says still running — reconnect once more with a fresh EventSource
+          _log(issueNumber, { type: 'thinking', message: 'Reconnecting after repeated drops…' });
+          _openStream(issueNumber, url);
+        } else {
+          _set(issueNumber, { status: 'failed', step: status.error || 'Connection lost', prUrl: null });
+          _log(issueNumber, { type: 'error', message: status.error || 'SSE connection lost' });
+        }
+      })
+      .catch(() => {
+        const latest = runStore.get(issueNumber);
+        if (latest?.status === 'running') {
+          _set(issueNumber, { status: 'failed', step: 'Connection lost', prUrl: null });
+          _log(issueNumber, { type: 'error', message: 'SSE connection lost — server unreachable' });
+        }
+      });
+  };
+}
+
+// ── Post-refresh reconnection helpers ─────────────────────────
+
+/**
+ * Convert a single DB log row (from GET /runs/{id}/logs) into a frontend log
+ * entry suitable for logStore.
+ * Returns null for event types that should not appear in the log.
+ *
+ * @param {{ event_type: string, data: object, logged_at: string }} dbLog
+ */
+function _dbLogToEntry(dbLog) {
+  const data = dbLog.data ?? {};
+  const ts = new Date(dbLog.logged_at).getTime();
+
+  switch (dbLog.event_type) {
+    case 'start':
+      return { type: 'progress', message: `Started: issue #${data.issue_number ?? ''}`, ts };
+    case 'progress':
+      return data.step === 'thinking'
+        ? { type: 'thinking', message: data.message ?? '', ts }
+        : { type: 'progress', message: data.message ?? '', ts };
+    case 'reasoning':
+      return { type: 'reasoning', message: data.content ?? '', ts };
+    case 'tool_call':
+      return { type: 'tool_call', message: data.tool ?? '', tool: data.tool, path: data.path ?? '', ts };
+    case 'tool_result': {
+      // eslint-disable-next-line no-control-regex
+      const clean = (data.output ?? '').replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').trim();
+      const lines = clean.split('\n').filter((l) => l.trim());
+      const firstLine = (lines[0] ?? '').slice(0, 140);
+      const extra = lines.length > 1 ? `  (+${lines.length - 1} lines)` : '';
+      return firstLine ? { type: 'tool_result', message: firstLine + extra, ts } : null;
+    }
+    case 'needs_review':
+      return { type: 'done', message: `Changes committed on ${data.branch ?? 'branch'} — ready to push`, ts };
+    case 'complete':
+      return {
+        type: 'done',
+        message: data.pr_pending
+          ? `Branch pushed (${data.branch ?? ''}) — PR being created…`
+          : `Complete${data.pr_url ? ` → ${data.pr_url}` : ''}`,
+        ts,
+      };
+    case 'error':
+      return { type: 'error', message: data.message ?? 'Error', ts };
+    case 'pr_ready':
+      return { type: 'done', message: `PR opened → ${data.pr_url ?? ''}`, ts };
+    case 'close':
+    case 'ping':
+      return null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Fetch the persisted log events for a run from the backend DB, populate
+ * logStore with them (replacing any locally-cached entries), and return
+ * metadata needed for reconnection dedup.
+ *
+ * @returns {Promise<{lastTs:number, lastEventType:string|null, lastEventData:object}>}
+ */
+async function _loadBackendLogs(issueNumber, runId, endpoint) {
+  try {
+    const resp = await fetch(`${endpoint}/runs/${runId}/logs`);
+    if (!resp.ok) return { lastTs: 0, lastEventType: null, lastEventData: {} };
+    const dbLogs = await resp.json();
+
+    // Replace localStorage-cached logs with the authoritative backend history
+    logStore.set(issueNumber, []);
+    let lastTs = 0;
+    let lastEventType = null;
+    let lastEventData = {};
+
+    for (const dbLog of dbLogs) {
+      const entry = _dbLogToEntry(dbLog);
+      if (entry) {
+        logStore.get(issueNumber).push(entry);
+        if (entry.ts > lastTs) lastTs = entry.ts;
+      }
+      if (!['close', 'ping'].includes(dbLog.event_type)) {
+        lastEventType = dbLog.event_type;
+        lastEventData = dbLog.data ?? {};
+      }
+    }
+
+    _persistLogs();
+    for (const fn of _listeners) fn(issueNumber);
+    return { lastTs, lastEventType, lastEventData };
+  } catch {
+    return { lastTs: 0, lastEventType: null, lastEventData: {} };
+  }
+}
+
+/**
+ * Check the backend for the current state of a run that was active when the
+ * page last unloaded, and reconnect or update local state accordingly.
+ *
+ * Called as a microtask after the module finishes loading so that all
+ * subscribers (signals, board) are already registered.
+ *
+ * @param {number} issueNumber
+ */
+async function _reconnectRun(issueNumber) {
+  const run = runStore.get(issueNumber);
+  if (!run) return;
+
+  const runId = run.runId;
+  const endpoint = run._endpoint ?? AGENT_BASE;
+
+  // Brief "reconnecting" label while we query the server
+  _set(issueNumber, { ...run, status: 'running', step: 'Reconnecting…' });
+
+  try {
+    const resp = await fetch(`${endpoint}/runs/${runId}/status`, {
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!resp.ok) {
+      // 404 = server was restarted and lost the run; treat as interrupted
+      _set(issueNumber, { ...runStore.get(issueNumber), status: 'failed', step: 'Interrupted' });
+      return;
+    }
+
+    const status = await resp.json();
+
+    // Load authoritative log history from the DB regardless of outcome
+    const { lastTs, lastEventType, lastEventData } = await _loadBackendLogs(issueNumber, runId, endpoint);
+
+    if (status.status === 'running') {
+      // Agent is still running — reattach to the live SSE stream.
+      // Events with timestamps <= lastTs are already in logStore; skip them.
+      _set(issueNumber, { ...runStore.get(issueNumber), status: 'running', step: 'Reconnected' });
+      _log(issueNumber, { type: 'progress', message: 'Reconnected after page refresh' });
+      _openStream(issueNumber, `${endpoint}/runs/${runId}/stream`, lastTs);
+    } else if (status.status === 'complete') {
+      // Agent finished while the frontend was disconnected
+      const cur = runStore.get(issueNumber);
+      if (lastEventType === 'needs_review') {
+        // assist / semi-autonomous mode: changes committed, awaiting push
+        _set(issueNumber, {
+          ...cur,
+          status: 'needs_review',
+          step: 'Ready to push',
+          prUrl: null,
+          runId: lastEventData.run_id ?? runId,
+          branch: lastEventData.branch ?? status.branch ?? null,
+          worktreePath: lastEventData.worktree_path ?? null,
+        });
+      } else if (status.pr_url) {
+        _set(issueNumber, { ...cur, status: 'done', step: 'PR opened', prUrl: status.pr_url });
+        _log(issueNumber, { type: 'done', message: `PR opened → ${status.pr_url}` });
+      } else if (lastEventType === 'complete' && lastEventData.pr_pending) {
+        // PR creation was still in progress — resume polling
+        _set(issueNumber, { ...cur, status: 'done', step: 'PR being created…', prUrl: null });
+        _pollForPr(issueNumber, runId, endpoint);
+      } else {
+        _set(issueNumber, { ...cur, status: 'done', step: 'Complete', prUrl: null });
+      }
+    } else {
+      // failed or unrecognised — surface the error message if available
+      _set(issueNumber, {
+        ...runStore.get(issueNumber),
+        status: 'failed',
+        step: status.error ?? 'Failed',
+      });
+    }
+  } catch {
+    _set(issueNumber, { ...runStore.get(issueNumber), status: 'failed', step: 'Interrupted' });
+  }
 }
 
 // ── Refine (improve issue description) ───────────────────────
