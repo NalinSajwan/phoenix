@@ -1,61 +1,79 @@
-# Skill: <skill_name>
+---
+contract_version: "1.0.0"
+name: skill_name
+version: "1.0.0"
+description: "One sentence describing what this skill does."
+---
 
-<!-- Replace <skill_name> with a concise, human-readable title, e.g. "Write Tests" -->
+# Skill: Skill Name
 
-## Purpose
+## Description
 
-<!-- One or two sentences describing what this skill enables the agent to do.
-     Be specific: what task does it handle, and why is it valuable? -->
+Two to four sentences explaining what the skill does and why it exists.
+Expand on the front-matter `description` field — add context, motivation,
+and any nuance that helps an agent decide whether to apply this skill.
 
-## When to use
+## Inputs
 
-<!-- Describe the conditions under which this skill should be activated.
-     Examples: "When the issue requests new unit tests", "When refactoring
-     an existing module without changing its public API". -->
+| Name | Type | Required | Description |
+| ---- | ---- | -------- | ----------- |
+| …    | …    | Yes / No | …           |
 
-## Instructions
+<!-- If the skill accepts no inputs, replace the table with: _None._ -->
 
-<!-- Step-by-step guidance the agent must follow when this skill is active.
-     Use numbered lists for ordered steps and bullet points for constraints. -->
+## Outputs
 
-1. Step one — …
-2. Step two — …
-3. Step three — …
+| Name | Type | Description |
+| ---- | ---- | ----------- |
+| …    | …    | …           |
 
-### Constraints
+<!-- If the skill produces no outputs, replace the table with: _None._ -->
 
-- <!-- Things the agent must NOT do while this skill is active -->
-- <!-- Keep constraints binary and verifiable -->
+## Usage
 
-## Acceptance criteria
+<!-- Show the minimal invocation needed to exercise the skill.
+     Prefer a concrete, copy-paste-ready example. -->
 
-<!-- Binary pass/fail checks that confirm the skill was applied correctly.
-     The agent (or a reviewer) should be able to tick each item. -->
-
-- [ ] …
-- [ ] …
-
-## Examples
-
-<!-- Optional but highly recommended: show a concrete before/after or
-     an example input/output that illustrates correct application. -->
-
-### Input
-
-```
-<!-- Paste a representative issue title + body or task description here -->
-```
-
-### Expected output
-
-```
-<!-- Describe or show what a correct agent response looks like -->
+```text
+<!-- example invocation or task description here -->
 ```
 
 ---
 
-<!-- Remove this comment block before submitting:
-     - Rename this file to <your_skill_name>.md (snake_case)
-     - Delete every placeholder comment (<!-- … -->)
-     - Verify the skill appears via: python -c "from native_skills import list_skills; print(list_skills())"
+<!-- Optional sections — delete any that do not apply. -->
+
+## Examples
+
+<!-- Additional concrete invocations that illustrate edge cases or common patterns. -->
+
+### Input
+
+```text
+<!-- Representative issue title + body or task description -->
+```
+
+### Expected output
+
+```text
+<!-- Describe or show what a correct agent response looks like -->
+```
+
+## Limitations
+
+<!-- Known constraints, unsupported environments, or behaviours that may surprise users. -->
+
+## See Also
+
+<!-- Relative links to related skill files or external documentation. -->
+
+---
+
+<!-- Before submitting:
+     1. Rename this file to <your_skill_name>.md (snake_case, matches `name` field above)
+     2. Update all front-matter fields (contract_version, name, version, description)
+     3. Fill in every required section (Description, Inputs, Outputs, Usage)
+     4. Delete optional sections you don't need
+     5. Remove all placeholder comments (this block included)
+     6. Verify the skill appears via:
+        python -c "from native_skills import list_skills; print(list_skills())"
 -->
