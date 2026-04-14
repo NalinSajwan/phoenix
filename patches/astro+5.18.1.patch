@@ -1,0 +1,13 @@
+diff --git a/node_modules/astro/dist/runtime/client/dev-toolbar/apps/audit/rules/a11y.js b/node_modules/astro/dist/runtime/client/dev-toolbar/apps/audit/rules/a11y.js
+index f09d433..88f3778 100644
+--- a/node_modules/astro/dist/runtime/client/dev-toolbar/apps/audit/rules/a11y.js
++++ b/node_modules/astro/dist/runtime/client/dev-toolbar/apps/audit/rules/a11y.js
+@@ -479,7 +479,7 @@ const a11y = [
+       for (const elementRole of elementRoles) {
+         const { props } = roles.get(elementRole);
+         const attributes = getAttributeObject(element);
+-        const unsupportedAttributes = aria.keys().filter((attribute) => !(attribute in props));
++        const unsupportedAttributes = Array.from(aria.keys()).filter((attribute) => !(attribute in props));
+         const invalidAttributes = Object.keys(attributes).filter(
+           (key) => key.startsWith("aria-") && unsupportedAttributes.includes(key)
+         );

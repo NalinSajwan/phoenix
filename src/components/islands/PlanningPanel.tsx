@@ -66,6 +66,27 @@ const DIAGRAM_TEMPLATES: Record<string, string> = {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/** Extract the first balanced JSON object from a string (handles markdown fences). */
+function extractJson(text: string): any {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const candidate = fenced ? fenced[1] : text;
+  const start = candidate.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < candidate.length; i++) {
+    const ch = candidate[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inString) { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') { depth--; if (depth === 0) return JSON.parse(candidate.slice(start, i + 1)); }
+  }
+  return null;
+}
+
 function relativeTime(iso: string): string {
   const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
   if (mins < 1) return 'just now';
@@ -751,11 +772,7 @@ Generate 2–6 issues.`;
 
     try {
       const text = await streamAgentText(prompt, buildContextNotes());
-      const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-      const candidate = fenced ? fenced[1] : text;
-      const jsonMatch = candidate.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error('Could not parse issues from AI response.');
-      const parsed = JSON.parse(jsonMatch[0]);
+      const parsed = extractJson(text);
       const issues: GeneratedIssue[] = parsed.issues ?? [];
       setGeneratedIssues(issues);
       if (issues.length > 0) {
@@ -873,12 +890,8 @@ Focus on: technical approach choices, scope boundaries, constraints, dependencie
 
     try {
       const fullText = await streamAgentText(question, sourceNotes);
-      const fenced = fullText.match(/```(?:json)?\s*([\s\S]*?)```/);
-      const candidate = fenced ? fenced[1] : fullText;
-      const jsonMatch = candidate.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error('Could not parse questions from AI response.');
-      const parsed = JSON.parse(jsonMatch[0]);
-      const questions: string[] = parsed.questions ?? [];
+      const parsed = extractJson(fullText);
+      const questions: string[] = parsed?.questions ?? [];
       if (questions.length === 0) throw new Error('No questions returned.');
       setDecisionsQuestions(questions);
       setDecisionsAnswers(new Array(questions.length).fill(''));
@@ -977,12 +990,8 @@ Generate 2–6 issues.`;
 
       const contextNotes = isMulti ? decisionsSourceNotes : [notesRef.current.find((n) => n.id === decisionsNoteId)!].filter(Boolean);
       const text = await streamAgentText(prompt, contextNotes);
-      const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-      const candidate = fenced ? fenced[1] : text;
-      const jsonMatch = candidate.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error('Could not parse issues from AI response.');
-      const parsed = JSON.parse(jsonMatch[0]);
-      const issues: GeneratedIssue[] = parsed.issues ?? [];
+      const parsed = extractJson(text);
+      const issues: GeneratedIssue[] = parsed?.issues ?? [];
       setGeneratedIssues(issues);
       if (issues.length > 0) {
         setChatMessages((prev) => [

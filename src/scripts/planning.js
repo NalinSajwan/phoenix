@@ -1039,9 +1039,23 @@ function _extractJson(text) {
   // strip ```json … ``` or ``` … ``` wrappers
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   const candidate = fenced ? fenced[1] : text;
-  const match = candidate.match(/\{[\s\S]*\}/);
-  if (!match) return null;
-  return JSON.parse(match[0]);
+  // Use balanced-brace extraction instead of greedy regex to avoid capturing
+  // trailing text that produces invalid JSON.
+  const start = candidate.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < candidate.length; i++) {
+    const ch = candidate[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inString) { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') { depth--; if (depth === 0) return JSON.parse(candidate.slice(start, i + 1)); }
+  }
+  return null;
 }
 
 /** Phase 1 — ask the AI to surface assumptions/edge cases before generating issues. */
